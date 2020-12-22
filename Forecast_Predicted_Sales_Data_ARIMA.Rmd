@@ -1,0 +1,199 @@
+---
+title: "Forecasting: Predicted Sales Data"
+author: "Sonia Nikiema"
+date: "12/22/2020"
+output: 
+  html_document: 
+    toc: yes
+---
+
+
+# Reflection
+
+Daily historical data is used to predict futur sales. This is kaggle competion and data comes from ["Predict Future Sales"](https://www.kaggle.com/c/competitive-data-science-predict-future-sales)
+
+Let's get started!!!
+
+# Forecasting 1C company total sales overtime
+
+## Load Library
+
+```{r Load library, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(tidyverse)  # For ggplot, dplyr, and friends
+library(lubridate)
+library(scales)     # For nicer labels
+library(tsibble)
+library(forecast)
+library(tseries)  ##We will use tsible to create year_month index
+library(zoo)
+library(rio)
+library(fable)
+library(feasts)
+library(stats)
+```
+
+## Load Package
+
+```{r Load package}
+# SalesTrain contains all necessary items for the prediction except ID #
+raw_salesTrain<- read.csv("data/sales_train.csv")
+```
+
+## Big clean
+### Clean sales_train
+
+
+```{r}
+salesTrain <- raw_salesTrain %>%
+# converte date variable to date format
+  mutate(date = gsub("[.]", "/", date))%>%
+# converte date variable to date format
+  mutate(date=as.Date.character(date, format="%d/%m/%Y"))%>%
+  
+# convert number variable into factor variable  
+    mutate(shop_id=factor(shop_id))%>%
+   mutate(item_id=factor(item_id))%>%
+  mutate(month=factor(month(date),ordered = TRUE))%>%
+  mutate(year=factor(year(date)))%>%
+
+  # mutate item count day into item count month
+   mutate(item_cnt_month=item_cnt_day)
+```
+
+### Select the predicted year
+
+```{r}
+clean_salesTrain<-salesTrain%>%
+  filter(year==2015)%>%
+  select(date, item_id, item_cnt_month)%>%
+   mutate(year_month = yearmonth(date))
+```
+
+```{r Preapare data for time series plot}
+  ggplot(clean_salesTrain, aes(x = year_month, y = item_cnt_month)) +
+  geom_line()
+```
+
+Our data is now clean but it does mot have time-enabled data frame (a tsibble) which is indexed by the year+month for each row.
+
+## Create time-enabled data frame
+
+```{r}
+library(tsibble)  # For embedding time things into data frames
+
+# Since tsibble must have distinct rows identified by key and index. We will delete duplicates rows by grouping by year_month
+sales_tsbl<-clean_salesTrain%>%
+group_by(year_month)%>%
+  summarise(item_cnt_month = n())%>%
+  as_tsibble(index = year_month)
+  
+print(sales_tsbl)
+```
+
+## ARIMA() modeling in R
+### Creating the model
+
+```{r}
+model <- sales_tsbl %>% 
+  model(stl = STL(item_cnt_month ~ season(window="periodic")))
+
+#check the model
+model
+```
+
+### decompose the model
+
+```{r}
+decomp_model <- components(model)
+
+#check decomposed model
+decomp_model
+```
+
+### plot the model
+
+```{r}
+graph<- decomp_model %>%
+  autoplot(season_adjust)
+graph
+```
+
+```{r}
+ggsave("graph.png", graph)
+```
+
+
+###  White Noise assumption 
+
+```{r}
+decomp_model %>%
+  gg_tsdisplay(difference(season_adjust), plot_type='partial')
+```
+
+Obviously our data seems to be white noise and stationary. Therefore variables are independent and identically distributed with a mean of zero. This means that all variables have the same variance (sigma^2) and each value has a zero correlation with all other values in the series
+
+###  fit the model
+
+```{r}
+# to avoid "Error: Failed to create output due to bad names. * Choose another strategy with `names_repair`", we will select the model components without .model
+
+decomp_modelNostl<- decomp_model%>%
+  select(-.model)
+
+fit <- decomp_modelNostl %>%
+  model(
+    arima = ARIMA(season_adjust ~ pdq(0,0,0) + PDQ(0,0,0))
+  )
+report(fit)
+```
+
+###  checking residuals
+
+```{r}
+fit %>% 
+  gg_tsresiduals()
+```
+
+
+### Forecast
+
+```{r}
+fit %>% 
+  forecast(h=2) %>% 
+  autoplot(decomp_modelNostl)
+```
+
+
+```{r}
+fit %>% 
+  forecast(h=2)
+```
+
+### Extract values from forecast to time series data frame
+
+```{r}
+tscountObject <- ts(sales_tsbl$item_cnt_month, 
+  start = c(2015,1), 
+  end = c(2015,10), 
+  frequency = 10)
+
+fcast<-forecast(arima(ts(tscountObject)))
+
+sales_tsbl$forecast<- fcast$mean
+sales_tsbl
+```
+
+
+```{r}
+sim <- fit %>% 
+  generate(h = 2, times = 5, bootstrap = TRUE)
+sim
+```
+
+
+
+
+
+
+
